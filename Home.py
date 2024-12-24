@@ -3,6 +3,46 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
+import psycopg2 as pg
+
+
+query = """
+    SELECT 
+        round_num,
+        donor_address as voter,
+        sum(amount_in_usd) as donated_usd,
+        count(distinct recipient_address) as num_projects
+    FROM 
+        all_donations ad
+    WHERE round_num IS NOT NULL
+    GROUP BY 1,2
+"""
+
+@st.cache_data(ttl=60*60*24)
+def run_query(query, params=None, database="grants"):
+    """Run a parameterized query on the specified database and return results as a DataFrame."""
+    try:
+        conn = pg.connect(host=st.secrets[database]["host"], 
+                            port=st.secrets[database]["port"], 
+                            dbname=st.secrets[database]["dbname"], 
+                            user=st.secrets[database]["user"], 
+                            password=st.secrets[database]["password"])
+        cur = conn.cursor()
+        if params is None:
+            cur.execute(query)
+        else:
+            cur.execute(query, params)
+        col_names = [desc[0] for desc in cur.description]
+        results = pd.DataFrame(cur.fetchall(), columns=col_names)
+    except pg.Error as e:
+        st.warning(f"ERROR: Could not execute the query. {e}")
+    finally:
+        cur.close()
+        conn.close()
+    return results
+
+
+
 
 # Set page config
 st.set_page_config(page_title="Donor Cohort Dashboard", layout="wide")
@@ -71,14 +111,12 @@ def format_graph(fig, title, x_title, y_title, y2_title=None):
 # Load data in a function
 @st.cache_data  # Cache the data loading
 def load_data():
-    gg_voters = pd.read_csv('data/midgg22_donors.csv')
-    gg22_voters = pd.read_csv('data/gg22_voters_for_retention_analysis_end.csv')
-    return gg_voters, gg22_voters
+    all_voters = run_query(query)
+    return all_voters
 
 # Data processing in a function
-def process_data(gg_voters, gg22_voters, filter_fc, filter_gs, filter_passport):
+def process_data(all_voters, filter_fc, filter_gs, filter_passport):
     # Combine and filter data
-    all_voters = pd.concat([gg_voters, gg22_voters])
     all_voters = all_voters[all_voters['voter'].str.startswith('0x') & (all_voters['voter'].str.len() == 42)]
     
     # Apply filters based on toggles
@@ -500,12 +538,11 @@ def plot_donation_distribution(all_voters):
 # Main app logic
 def main():
     # Load data
-    gg_voters, gg22_voters = load_data()
+    all_voters = load_data()
     
     # Process data based on filters
     all_voters, cohort_table, retention_table, stats = process_data(
-        gg_voters, 
-        gg22_voters, 
+        all_voters,
         FILTER_TO_FC, 
         FILTER_TO_GS, 
         FILTER_TO_PASSPORT
